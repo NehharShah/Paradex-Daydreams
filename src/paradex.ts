@@ -1,0 +1,327 @@
+// most stuff here is taken from
+// https://github.com/tradeparadex/code-samples/tree/main/typescript
+
+import BigNumber from "bignumber.js";
+import type { Account, SystemConfig } from "./types";
+import {
+    ec,
+    shortString,
+    type TypedData,
+    typedData as starkTypedData,
+} from "starknet";
+
+interface AuthRequest extends Record<string, unknown> {
+    method: string;
+    path: string;
+    body: string;
+    timestamp: number;
+    expiration: number;
+}
+
+const DOMAIN_TYPES = {
+    StarkNetDomain: [
+        { name: "name", type: "felt" },
+        { name: "chainId", type: "felt" },
+        { name: "version", type: "felt" },
+    ],
+};
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+//
+// public
+//
+
+export async function authenticate(config: SystemConfig, account: Account) {
+    const { signature, timestamp, expiration } = signAuthRequest(
+        config,
+        account,
+    );
+    const headers = {
+        Accept: "application/json",
+        "PARADEX-STARKNET-ACCOUNT": account.address,
+        "PARADEX-STARKNET-SIGNATURE": signature,
+        "PARADEX-TIMESTAMP": timestamp.toString(),
+        "PARADEX-SIGNATURE-EXPIRATION": expiration.toString(),
+    };
+
+    try {
+        const response = await fetch(`${config.apiBaseUrl}/auth`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({}),
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return data.jwt_token;
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+export async function getAccountInfo(config: SystemConfig, account: Account) {
+    const headers = {
+        Accept: "application/json",
+        Authorization: `Bearer ${account.jwtToken}`,
+    };
+
+    try {
+        const response = await fetch(`${config.apiBaseUrl}/account`, {
+            method: "GET",
+            headers,
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log("Account Info:", data);
+        return data;
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+export async function listAvailableMarkets(
+    config: SystemConfig,
+    market?: string,
+) {
+    const headers = {
+        Accept: "application/json",
+    };
+
+    try {
+        const url = market
+            ? `${config.apiBaseUrl}/markets?market=${market}`
+            : `${config.apiBaseUrl}/markets`;
+
+        const response = await fetch(url, {
+            method: "GET",
+            headers,
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log("Available Markets:", data);
+        return data;
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+export async function getOpenOrders(config: SystemConfig, account: Account) {
+    const headers = {
+        Accept: "application/json",
+        Authorization: `Bearer ${account.jwtToken}`,
+    };
+
+    try {
+        const response = await fetch(`${config.apiBaseUrl}/orders`, {
+            method: "GET",
+            headers,
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log("Open Orders:", data);
+        return data;
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+export async function createOrder(
+    config: SystemConfig,
+    account: Account,
+    orderDetails: Record<string, string>,
+) {
+    const timestamp = Date.now();
+    const signature = signOrder(config, account, orderDetails, timestamp);
+
+    const inputBody = JSON.stringify({
+        ...orderDetails,
+        signature: signature,
+        signature_timestamp: timestamp,
+    });
+
+    const headers = {
+        Accept: "application/json",
+        Authorization: `Bearer ${account.jwtToken}`,
+        "Content-Type": "application/json",
+    };
+
+    try {
+        const response = await fetch(`${config.apiBaseUrl}/orders`, {
+            method: "POST",
+            headers,
+            body: inputBody,
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log("Order created:", data);
+        return data;
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+//
+// private
+//
+
+// Utility function to generate current and expiration timestamps
+function generateTimestamps(): {
+    timestamp: number;
+    expiration: number;
+} {
+    const dateNow = new Date();
+    const dateExpiration = new Date(dateNow.getTime() + SEVEN_DAYS_MS);
+
+    return {
+        timestamp: Math.floor(dateNow.getTime() / 1000),
+        expiration: Math.floor(dateExpiration.getTime() / 1000),
+    };
+}
+
+function signAuthRequest(
+    config: SystemConfig,
+    account: Account,
+): {
+    signature: string;
+    timestamp: number;
+    expiration: number;
+} {
+    const { timestamp, expiration } = generateTimestamps();
+
+    const request: AuthRequest = {
+        method: "POST",
+        path: "/v1/auth",
+        body: "", // Assuming no body is required for this request
+        timestamp,
+        expiration,
+    };
+
+    const typedData = buildAuthTypedData(request, config.starknet.chainId);
+    const signature = signatureFromTypedData(account, typedData);
+
+    return { signature, timestamp, expiration };
+}
+
+function signOrder(
+    config: SystemConfig,
+    account: Account,
+    orderDetails: Record<string, string>,
+    timestamp: number,
+): string {
+    const sideForSigning = orderDetails.side === "BUY" ? "1" : "2";
+
+    const priceForSigning = toQuantums(orderDetails.price ?? "0", 8);
+    const sizeForSigning = toQuantums(orderDetails.size, 8);
+    const orderTypeForSigning = shortString.encodeShortString(
+        orderDetails.type,
+    );
+    const marketForSigning = shortString.encodeShortString(orderDetails.market);
+
+    const message = {
+        timestamp: timestamp,
+        market: marketForSigning,
+        side: sideForSigning,
+        orderType: orderTypeForSigning,
+        size: sizeForSigning,
+        price: priceForSigning,
+    };
+
+    const typedData = buildOrderTypedData(message, config.starknet.chainId);
+    const signature = signatureFromTypedData(account, typedData);
+
+    return signature;
+}
+
+function buildAuthTypedData(
+    message: Record<string, unknown>,
+    starknetChainId: string,
+) {
+    const paradexDomain = buildParadexDomain(starknetChainId);
+    return {
+        domain: paradexDomain,
+        primaryType: "Request",
+        types: {
+            ...DOMAIN_TYPES,
+            Request: [
+                { name: "method", type: "felt" }, // string
+                { name: "path", type: "felt" }, // string
+                { name: "body", type: "felt" }, // string
+                { name: "timestamp", type: "felt" }, // number
+                { name: "expiration", type: "felt" }, // number
+            ],
+        },
+        message,
+    };
+}
+
+function buildOrderTypedData(
+    message: Record<string, unknown>,
+    starknetChainId: string,
+) {
+    const paradexDomain = buildParadexDomain(starknetChainId);
+    return {
+        domain: paradexDomain,
+        primaryType: "Order",
+        types: {
+            ...DOMAIN_TYPES,
+            Order: [
+                { name: "timestamp", type: "felt" }, // UnixTimeMs; Acts as a nonce
+                { name: "market", type: "felt" }, // 'BTC-USD-PERP'
+                { name: "side", type: "felt" }, // '1': 'BUY'; '2': 'SELL'
+                { name: "orderType", type: "felt" }, // 'LIMIT';  'MARKET'
+                { name: "size", type: "felt" }, // Quantum value
+                { name: "price", type: "felt" }, // Quantum value; '0' for Market order
+            ],
+        },
+        message,
+    };
+}
+
+function buildParadexDomain(starknetChainId: string) {
+    return {
+        name: "Paradex",
+        chainId: starknetChainId,
+        version: "1",
+    };
+}
+
+function signatureFromTypedData(account: Account, typedData: TypedData) {
+    const msgHash = starkTypedData.getMessageHash(typedData, account.address);
+    const { r, s } = ec.starkCurve.sign(msgHash, account.privateKey);
+    return JSON.stringify([r.toString(), s.toString()]);
+}
+
+/**
+ * Convert to quantums rounding final number down.
+ *
+ * @param amount Amount in human numbers
+ * @param precision How many decimals the target contract works with
+ * @returns Quantum value
+ */
+export function toQuantums(
+    amount: BigNumber | string,
+    precision: number,
+): string {
+    const bnAmount = typeof amount === "string" ? BigNumber(amount) : amount;
+    const bnQuantums = bnAmount.dividedBy(`1e-${precision}`);
+    return bnQuantums.integerValue(BigNumber.ROUND_FLOOR).toString();
+}
