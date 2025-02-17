@@ -1,4 +1,4 @@
-export interface Account {
+export interface ParadexAccount {
     address: string;
     // publicKey: string;
     //ethereumAccount: string;
@@ -6,7 +6,7 @@ export interface Account {
     jwtToken?: string;
 }
 
-export interface SystemConfig {
+export interface ParadexConfig {
     readonly apiBaseUrl: string;
     readonly starknet: {
         readonly chainId: string;

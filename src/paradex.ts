@@ -62,6 +62,7 @@ export async function authenticate(config: SystemConfig, account: Account) {
     }
 }
 
+// https://docs.paradex.trade/api-reference/prod/account/get
 export async function getAccountInfo(config: SystemConfig, account: Account) {
     const headers = {
         Accept: "application/json",
@@ -79,13 +80,13 @@ export async function getAccountInfo(config: SystemConfig, account: Account) {
         }
 
         const data = await response.json();
-        console.log("Account Info:", data);
         return data;
     } catch (e) {
         console.error(e);
     }
 }
 
+// https://docs.paradex.trade/api-reference/prod/markets/get-markets
 export async function listAvailableMarkets(
     config: SystemConfig,
     market?: string,
@@ -109,13 +110,37 @@ export async function listAvailableMarkets(
         }
 
         const data = await response.json();
-        console.log("Available Markets:", data);
-        return data;
+        return data.results;
     } catch (e) {
         console.error(e);
     }
 }
 
+// https://docs.paradex.trade/api-reference/prod/account/get-positions
+export async function getPositions(config: SystemConfig, account: Account) {
+    const headers = {
+        Accept: "application/json",
+        Authorization: `Bearer ${account.jwtToken}`,
+    };
+
+    try {
+        const response = await fetch(`${config.apiBaseUrl}/positions`, {
+            method: "GET",
+            headers,
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return data.results;
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+// https://docs.paradex.trade/api-reference/prod/orders/get-open-orders
 export async function getOpenOrders(config: SystemConfig, account: Account) {
     const headers = {
         Accept: "application/json",
@@ -133,14 +158,14 @@ export async function getOpenOrders(config: SystemConfig, account: Account) {
         }
 
         const data = await response.json();
-        console.log("Open Orders:", data);
-        return data;
+        return data.results;
     } catch (e) {
         console.error(e);
     }
 }
 
-export async function createOrder(
+// https://docs.paradex.trade/api-reference/prod/orders/new
+export async function openOrder(
     config: SystemConfig,
     account: Account,
     orderDetails: Record<string, string>,
@@ -172,8 +197,33 @@ export async function createOrder(
         }
 
         const data = await response.json();
-        console.log("Order created:", data);
         return data;
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+// https://docs.paradex.trade/api-reference/prod/orders/cancel
+export async function cancelOrder(
+    config: SystemConfig,
+    account: Account,
+    orderId: string,
+) {
+    const headers = {
+        Accept: "application/json",
+        Authorization: `Bearer ${account.jwtToken}`,
+    };
+
+    try {
+        const response = await fetch(`${config.apiBaseUrl}/orders/${orderId}`, {
+            method: "DELETE",
+            headers,
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return true;
     } catch (e) {
         console.error(e);
     }

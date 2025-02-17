@@ -8,6 +8,7 @@ const envSchema = z.object({
     PARADEX_PRIVATE_KEY: z.string().min(1),
     PARADEX_BASE_URL: z.string().min(1),
     PARADEX_CHAIN_ID: z.string().min(1),
+    GROQ_API_KEY: z.string().min(1),
 });
 
 type EnvConfig = z.infer<typeof envSchema>;
