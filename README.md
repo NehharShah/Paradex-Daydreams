@@ -6,7 +6,7 @@ A proof-of-concept trading agent that connects [Daydreams](https://www.dreams.fu
 
 - [Bun](https://bun.sh/) installed on your system
 - A Paradex account with API access
-- A Groq API key
+- A [Groq](https://groq.com/) API key
 
 ## Installation
 
