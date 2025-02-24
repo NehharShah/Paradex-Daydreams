@@ -7,9 +7,11 @@ import {
     getPositions,
     listAvailableMarkets,
     openOrder,
+    cancelOrder,
 } from "./paradex";
 import { env } from "./config";
-import { anthropic } from "@ai-sdk/anthropic";
+//import { anthropic } from "@ai-sdk/anthropic";
+import { groq } from "@ai-sdk/groq";
 import {
     action,
     cli,
@@ -18,6 +20,19 @@ import {
     createVectorStore,
 } from "@daydreamsai/core/v1";
 import { z } from "zod";
+
+interface Market {
+    symbol: string;
+    // Add other market properties if needed
+}
+
+interface ParadexOrder {
+    market: string;
+    side: string;
+    type: string;
+    size: string;
+    price: string;
+}
 
 async function paradexLogin(): Promise<
     { config: ParadexConfig; account: ParadexAccount }
@@ -76,24 +91,42 @@ async function main() {
 
     const openOrderAction = action({
         name: "paradex-open-order",
-        description:
-            "Create an order on Paradex. The action requires which market to open the order on, the price and size (as strings), the side (either BUY or SELL) and a type of order (MARKET or LIMIT).",
+        description: "Open a new order on Paradex",
         schema: z.object({
-            instruction: z.literal("GTC").describe(
-                "Order instruction, Good Till Cancelled",
-            ),
-            market: z.string().describe(
-                "Market for which the order is created",
-            ),
-            price: z.string().describe("Order price"),
-            size: z.string().describe("Size of the order"),
-            side: z.enum(["BUY", "SELL"]).describe("Order side"),
-            type: z.enum(["MARKET", "LIMIT"]).describe("Order type"),
+            text: z.string().describe("Command text")
         }),
         handler: async (call, _ctx, _agent) => {
-            const response = await openOrder(config, account, call.data);
-            return response;
-        },
+            try {
+                const parts = call.data.text.split(' ');
+                const startIndex = parts[0] === 'paradex-open-order' ? 1 : 0;
+                
+                if (parts.length < startIndex + 5) {
+                    return { 
+                        success: false, 
+                        message: "Usage: paradex-open-order <market> <side> <type> <size> <price>"
+                    };
+                }
+
+                const orderDetails = {
+                    market: parts[startIndex],
+                    side: parts[startIndex + 1],
+                    type: parts[startIndex + 2],
+                    size: parts[startIndex + 3],
+                    price: parts[startIndex + 4],
+                    timeInForceType: "GTC"
+                };
+                
+                console.log("Sending order:", orderDetails);
+                const result = await openOrder(config, account, orderDetails);
+                return { 
+                    success: true, 
+                    message: `Order opened successfully. Transaction hash: ${result.transactionHash}`
+                };
+            } catch (error) {
+                console.error('Error opening order:', error);
+                return { success: false, message: `Error: ${error instanceof Error ? error.message : String(error)}` };
+            }
+        }
     });
 
     const cancelOrderAction = action({
@@ -113,27 +146,54 @@ async function main() {
 
     const listOpenOrdersAction = action({
         name: "paradex-list-open-orders",
-        description:
-            "Fetch a list of all open orders. No inputs are necessary.",
-        schema: z.object({}),
+        description: "List all open orders on Paradex",
+        schema: z.object({
+            text: z.string()
+        }),
         handler: async (_call, _ctx, _agent) => {
-            const response = await getOpenOrders(config, account);
-            return response;
-        },
+            try {
+                const orders = await getOpenOrders(config, account);
+                if (!orders || orders.length === 0) {
+                    return {
+                        success: true,
+                        message: { text: "No open orders found" }
+                    };
+                }
+
+                const orderList = orders.map((order: ParadexOrder) => 
+                    `${order.market} ${order.side} ${order.type} Size: ${order.size} Price: ${order.price}`
+                ).join('\n');
+
+                return {
+                    success: true,
+                    message: { text: `Open Orders:\n${orderList}` }
+                };
+            } catch (error) {
+                console.error('Error listing orders:', error);
+                return {
+                    success: false,
+                    message: { text: `Error: ${error instanceof Error ? error.message : String(error)}` }
+                };
+            }
+        }
     });
 
     const listAvailableMarketsAction = action({
         name: "paradex-list-available-markets",
-        description:
-            "Fetch a list of all available markets. No inputs are necessary.",
+        description: "Fetch a list of all available markets. No inputs are necessary.",
         schema: z.object({}),
         handler: async (_call, _ctx, _agent) => {
-            const response = await listAvailableMarkets(config);
-            let markets: string[] = [];
-            for (const market of response) {
-                markets.push(market.symbol);
+            try {
+                const markets = await listAvailableMarkets(config);
+                if (!markets || markets.length === 0) {
+                    return { markets: "No markets available" };
+                }
+                const marketList = markets.map((market: { symbol: string }) => market.symbol).join(", ");
+                return { markets: marketList };
+            } catch (error) {
+                console.error('Error fetching markets:', error);
+                return { markets: "Error fetching markets", error: String(error) };
             }
-            return markets;
         },
     });
 
@@ -149,8 +209,7 @@ async function main() {
     });
 
     const agent = createDreams({
-        model: anthropic("claude-3-5-sonnet-20240620"),
-        //model: openai("gpt-3.5-turbo"),
+        model: groq("llama3-8b-8192"),
         memory: {
             store: createMemoryStore(),
             vector: createVectorStore(),
@@ -163,8 +222,10 @@ async function main() {
             listOpenOrdersAction,
             listAvailableMarketsAction,
             getPositionsAction,
-        ],
+        ]
     }).start();
+    
+    return agent;
 }
 
 if (import.meta.main) {

@@ -2,12 +2,13 @@
 // https://github.com/tradeparadex/code-samples/tree/main/typescript
 
 import BigNumber from "bignumber.js";
-import type { Account, SystemConfig } from "./types";
+import type { ParadexAccount, ParadexConfig } from "./types";
 import {
     ec,
     shortString,
     type TypedData,
     typedData as starkTypedData,
+    Account,
 } from "starknet";
 
 interface AuthRequest extends Record<string, unknown> {
@@ -31,7 +32,7 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 // public
 //
 
-export async function authenticate(config: SystemConfig, account: Account) {
+export async function authenticate(config: ParadexConfig, account: ParadexAccount) {
     const { signature, timestamp, expiration } = signAuthRequest(
         config,
         account,
@@ -63,7 +64,7 @@ export async function authenticate(config: SystemConfig, account: Account) {
 }
 
 // https://docs.paradex.trade/api-reference/prod/account/get
-export async function getAccountInfo(config: SystemConfig, account: Account) {
+export async function getAccountInfo(config: ParadexConfig, account: ParadexAccount) {
     const headers = {
         Accept: "application/json",
         Authorization: `Bearer ${account.jwtToken}`,
@@ -88,7 +89,7 @@ export async function getAccountInfo(config: SystemConfig, account: Account) {
 
 // https://docs.paradex.trade/api-reference/prod/markets/get-markets
 export async function listAvailableMarkets(
-    config: SystemConfig,
+    config: ParadexConfig,
     market?: string,
 ) {
     const headers = {
@@ -110,14 +111,18 @@ export async function listAvailableMarkets(
         }
 
         const data = await response.json();
+        if (!data.results) {
+            throw new Error('No results found in response');
+        }
         return data.results;
     } catch (e) {
-        console.error(e);
+        console.error('Error fetching markets:', e);
+        throw e; // Propagate the error instead of swallowing it
     }
 }
 
 // https://docs.paradex.trade/api-reference/prod/account/get-positions
-export async function getPositions(config: SystemConfig, account: Account) {
+export async function getPositions(config: ParadexConfig, account: ParadexAccount) {
     const headers = {
         Accept: "application/json",
         Authorization: `Bearer ${account.jwtToken}`,
@@ -141,7 +146,7 @@ export async function getPositions(config: SystemConfig, account: Account) {
 }
 
 // https://docs.paradex.trade/api-reference/prod/orders/get-open-orders
-export async function getOpenOrders(config: SystemConfig, account: Account) {
+export async function getOpenOrders(config: ParadexConfig, account: ParadexAccount) {
     const headers = {
         Accept: "application/json",
         Authorization: `Bearer ${account.jwtToken}`,
@@ -166,8 +171,8 @@ export async function getOpenOrders(config: SystemConfig, account: Account) {
 
 // https://docs.paradex.trade/api-reference/prod/orders/new
 export async function openOrder(
-    config: SystemConfig,
-    account: Account,
+    config: ParadexConfig,
+    account: ParadexAccount,
     orderDetails: Record<string, string>,
 ) {
     const timestamp = Date.now();
@@ -205,8 +210,8 @@ export async function openOrder(
 
 // https://docs.paradex.trade/api-reference/prod/orders/cancel
 export async function cancelOrder(
-    config: SystemConfig,
-    account: Account,
+    config: ParadexConfig,
+    account: ParadexAccount,
     orderId: string,
 ) {
     const headers = {
@@ -248,8 +253,8 @@ function generateTimestamps(): {
 }
 
 function signAuthRequest(
-    config: SystemConfig,
-    account: Account,
+    config: ParadexConfig,
+    account: ParadexAccount,
 ): {
     signature: string;
     timestamp: number;
@@ -272,8 +277,8 @@ function signAuthRequest(
 }
 
 function signOrder(
-    config: SystemConfig,
-    account: Account,
+    config: ParadexConfig,
+    account: ParadexAccount,
     orderDetails: Record<string, string>,
     timestamp: number,
 ): string {
@@ -354,7 +359,7 @@ function buildParadexDomain(starknetChainId: string) {
     };
 }
 
-function signatureFromTypedData(account: Account, typedData: TypedData) {
+function signatureFromTypedData(account: ParadexAccount, typedData: TypedData) {
     const msgHash = starkTypedData.getMessageHash(typedData, account.address);
     const { r, s } = ec.starkCurve.sign(msgHash, account.privateKey);
     return JSON.stringify([r.toString(), s.toString()]);
@@ -372,6 +377,6 @@ export function toQuantums(
     precision: number,
 ): string {
     const bnAmount = typeof amount === "string" ? BigNumber(amount) : amount;
-    const bnQuantums = bnAmount.dividedBy(`1e-${precision}`);
+    const bnQuantums = bnAmount.multipliedBy(new BigNumber(10).pow(precision));
     return bnQuantums.integerValue(BigNumber.ROUND_FLOOR).toString();
 }
