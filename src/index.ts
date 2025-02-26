@@ -10,7 +10,6 @@ import {
     cancelOrder,
 } from "./paradex";
 import { env } from "./config";
-//import { anthropic } from "@ai-sdk/anthropic";
 import { groq } from "@ai-sdk/groq";
 import {
     action,
@@ -20,12 +19,6 @@ import {
     createVectorStore,
 } from "@daydreamsai/core/v1";
 import { z } from "zod";
-
-interface Market {
-    symbol: string;
-    // Add other market properties if needed
-}
-
 interface ParadexOrder {
     market: string;
     side: string;
@@ -38,8 +31,8 @@ async function paradexLogin(): Promise<
     { config: ParadexConfig; account: ParadexAccount }
 > {
     // testnet
-    const apiBaseUrl = env.PARADEX_BASE_URL;
-    const chainId = shortString.encodeShortString(env.PARADEX_CHAIN_ID);
+    const apiBaseUrl = env.apiBaseUrl;
+    const chainId = shortString.encodeShortString(env.starknet.chainId);
     // mainnet, see https://api.prod.paradex.trade/v1/system/config
     // const apiBaseUrl = "https://api.prod.paradex.trade/v1"
     // const chainId = shortString.encodeShortString("PRIVATE_SN_PARACLEAR_MAINNET");
@@ -80,99 +73,201 @@ async function main() {
 
     const getAccountInfoAction = action({
         name: "paradex-get-account-info",
-        description:
-            "Get account information. No inputs are necessary. Returns the account value, free collateral and other details about the trading account.",
-        schema: z.object({}),
+        description: "Get account information including value and free collateral",
+        schema: z.object({
+            text: z.string().describe("Natural language request for account info")
+        }),
         handler: async (_call, _ctx, _agent) => {
-            const accountInfo = await getAccountInfo(config, account);
-            return accountInfo;
-        },
+            try {
+                const accountInfo = await getAccountInfo(config, account);
+                return {
+                    success: true,
+                    message: JSON.stringify({
+                        text: `Account Status: ${accountInfo.status}\nValue: ${accountInfo.account_value}\nFree Collateral: ${accountInfo.free_collateral}`
+                    })
+                };
+            } catch (error) {
+                return {
+                    success: false,
+                    message: JSON.stringify({ error: String(error) })
+                };
+            }
+        }
     });
 
     const openOrderAction = action({
         name: "paradex-open-order",
-        description: "Open a new order on Paradex",
+        description: "Open a new order on Paradex. You can describe your order in natural language, like 'buy 0.1 ETH at 3000 dollars' or 'sell 0.5 BTC at market price'.",
         schema: z.object({
-            text: z.string().describe("Command text")
+            text: z.string().describe("Natural language description of the order you want to place")
         }),
         handler: async (call, _ctx, _agent) => {
             try {
-                const parts = call.data.text.split(' ');
-                const startIndex = parts[0] === 'paradex-open-order' ? 1 : 0;
-                
-                if (parts.length < startIndex + 5) {
-                    return { 
-                        success: false, 
-                        message: "Usage: paradex-open-order <market> <side> <type> <size> <price>"
+                const availableMarkets = await listAvailableMarkets(config);
+                const text = call.data.text.toLowerCase();
+
+                // First look for the token/market name
+                const tokenMatch = text.match(/\b(?:buy|sell)\s+\d+\.?\d*\s+([a-zA-Z0-9]+)\b/i);
+                if (!tokenMatch) {
+                    return {
+                        success: false,
+                        message: JSON.stringify({
+                            text: "Please specify which token you want to trade"
+                        })
+                    };
+                }
+
+                const baseToken = tokenMatch[1].toUpperCase();
+                const marketSymbol = `${baseToken}-USD-PERP`;
+
+                console.log("Detected token:", baseToken);
+                console.log("Constructed market symbol:", marketSymbol);
+
+                const marketExists = availableMarkets.some((m: { symbol: string }) => m.symbol === marketSymbol);
+
+                if (!marketExists) {
+                    return {
+                        success: false,
+                        message: JSON.stringify({
+                            text: `Market ${marketSymbol} is not available. Please check the available markets list.`
+                        })
+                    };
+                }
+
+                const market = availableMarkets.find((m: { symbol: string }) => m.symbol === marketSymbol);
+                if (!market) {
+                    return {
+                        success: false,
+                        message: JSON.stringify({
+                            text: `Market ${marketSymbol} is not available`
+                        })
+                    };
+                }
+
+                const sideMatch = text.match(/\b(buy|sell)\b/);
+                const sizeMatch = text.match(/\b(\d+\.?\d*)\b/);
+
+                if (!sideMatch || !sizeMatch) {
+                    return {
+                        success: false,
+                        message: JSON.stringify({
+                            text: "Please specify the side (buy/sell) and size. For example: 'buy 0.1 LINK at market price'"
+                        })
+                    };
+                }
+
+                const size = sizeMatch ? Math.max(
+                    Number(market.order_size_increment),
+                    Math.ceil(Number(sizeMatch[1]) / Number(market.order_size_increment)) * Number(market.order_size_increment)
+                ).toString() : null;
+
+                if (!size) {
+                    return {
+                        success: false,
+                        message: JSON.stringify({
+                            text: "Invalid order size"
+                        })
                     };
                 }
 
                 const orderDetails = {
-                    market: parts[startIndex],
-                    side: parts[startIndex + 1],
-                    type: parts[startIndex + 2],
-                    size: parts[startIndex + 3],
-                    price: parts[startIndex + 4],
-                    timeInForceType: "GTC"
+                    market: marketSymbol,
+                    side: sideMatch[1].toUpperCase(),
+                    type: "MARKET",
+                    size,
+                    timeInForceType: "IOC"
                 };
-                
-                console.log("Sending order:", orderDetails);
-                const result = await openOrder(config, account, orderDetails);
-                return { 
-                    success: true, 
-                    message: `Order opened successfully. Transaction hash: ${result.transactionHash}`
-                };
+
+                console.log("Interpreted order:", orderDetails);
+
+                try {
+                    const result = await openOrder(config, account, orderDetails);
+                    console.log("Order response:", result);
+                    return {
+                        success: true,
+                        message: JSON.stringify({
+                            text: `Order opened successfully. Order ID: ${result.orderId}`
+                        })
+                    };
+                } catch (error) {
+                    return {
+                        success: false,
+                        message: JSON.stringify({
+                            error: error instanceof Error ? error.message : String(error)
+                        })
+                    };
+                }
             } catch (error) {
-                console.error('Error opening order:', error);
-                return { success: false, message: `Error: ${error instanceof Error ? error.message : String(error)}` };
+                console.error('Error processing order:', error);
+                return {
+                    success: false,
+                    message: JSON.stringify({ error: error instanceof Error ? error.message : String(error) })
+                };
             }
         }
     });
 
     const cancelOrderAction = action({
         name: "paradex-cancel-order",
-        description:
-            "Cancel an order on Paradex. The action requires the order ID.",
-        schema: z.object({ orderId: z.string().describe("Order ID") }),
+        description: "Cancel an existing order. You can say something like 'cancel order 123' or 'remove order ABC'",
+        schema: z.object({
+            text: z.string().describe("Natural language request to cancel an order")
+        }),
         handler: async (call, _ctx, _agent) => {
-            const _response = await cancelOrder(
-                config,
-                account,
-                call.data.orderId,
-            );
-            return "Order canceled";
+            try {
+                const text = call.data.text.toLowerCase();
+                const orderIdMatch = text.match(/(?:order|#)\s*([a-zA-Z0-9]+)/);
+
+                if (!orderIdMatch) {
+                    return {
+                        success: false,
+                        message: JSON.stringify({
+                            text: "Please specify the order ID. For example: 'cancel order 123'"
+                        })
+                    };
+                }
+
+                const orderId = orderIdMatch[1];
+                await cancelOrder(config, account, orderId);
+                return {
+                    success: true,
+                    message: JSON.stringify({
+                        text: `Order ${orderId} has been canceled successfully`
+                    })
+                };
+            } catch (error) {
+                return {
+                    success: false,
+                    message: JSON.stringify({
+                        text: error instanceof Error ? error.message : String(error)
+                    })
+                };
+            }
         },
     });
 
     const listOpenOrdersAction = action({
         name: "paradex-list-open-orders",
-        description: "List all open orders on Paradex",
+        description: "Show your current open orders",
         schema: z.object({
-            text: z.string()
+            text: z.string().describe("Natural language request to view open orders")
         }),
         handler: async (_call, _ctx, _agent) => {
             try {
                 const orders = await getOpenOrders(config, account);
-                if (!orders || orders.length === 0) {
-                    return {
-                        success: true,
-                        message: { text: "No open orders found" }
-                    };
-                }
-
-                const orderList = orders.map((order: ParadexOrder) => 
-                    `${order.market} ${order.side} ${order.type} Size: ${order.size} Price: ${order.price}`
-                ).join('\n');
-
                 return {
                     success: true,
-                    message: { text: `Open Orders:\n${orderList}` }
+                    message: JSON.stringify({
+                        text: orders.length ?
+                            `Your Open Orders:\n${orders.map((order: ParadexOrder) =>
+                                `• ${order.market}: ${order.side} ${order.size} @ ${order.price} (${order.type})`).join('\n')}` :
+                            "You don't have any open orders at the moment."
+                    })
                 };
             } catch (error) {
-                console.error('Error listing orders:', error);
                 return {
                     success: false,
-                    message: { text: `Error: ${error instanceof Error ? error.message : String(error)}` }
+                    message: JSON.stringify({ error: String(error) })
                 };
             }
         }
@@ -180,36 +275,72 @@ async function main() {
 
     const listAvailableMarketsAction = action({
         name: "paradex-list-available-markets",
-        description: "Fetch a list of all available markets. No inputs are necessary.",
-        schema: z.object({}),
+        description: "Show available trading markets",
+        schema: z.object({
+            text: z.string().describe("Natural language request to view available markets")
+        }),
         handler: async (_call, _ctx, _agent) => {
             try {
                 const markets = await listAvailableMarkets(config);
                 if (!markets || markets.length === 0) {
-                    return { markets: "No markets available" };
+                    return {
+                        success: true,
+                        message: JSON.stringify({
+                            text: "No trading markets are available at the moment."
+                        })
+                    };
                 }
-                const marketList = markets.map((market: { symbol: string }) => market.symbol).join(", ");
-                return { markets: marketList };
+
+                const marketList = markets
+                    .map((market: { symbol: string }) => market.symbol)
+                    .join("\n• ");
+
+                return {
+                    success: true,
+                    message: JSON.stringify({
+                        text: `Available Trading Markets:\n• ${marketList}`
+                    })
+                };
             } catch (error) {
-                console.error('Error fetching markets:', error);
-                return { markets: "Error fetching markets", error: String(error) };
+                return {
+                    success: false,
+                    message: JSON.stringify({
+                        error: error instanceof Error ? error.message : String(error)
+                    })
+                };
             }
-        },
+        }
     });
 
     const getPositionsAction = action({
         name: "paradex-get-positions",
-        description:
-            "Fetch a list of all open positions. No inputs are necessary.",
-        schema: z.object({}),
+        description: "Show your current trading positions",
+        schema: z.object({
+            text: z.string().describe("Natural language request to view positions")
+        }),
         handler: async (_call, _ctx, _agent) => {
-            const response = await getPositions(config, account);
-            return response;
-        },
+            try {
+                const positions = await getPositions(config, account);
+                return {
+                    success: true,
+                    message: JSON.stringify({
+                        text: positions.length ?
+                            `Current positions:\n${positions.map((p: { market: string; size: string; price: string }) =>
+                                `${p.market}: ${p.size} @ ${p.price}`).join('\n')}` :
+                            "No open positions"
+                    })
+                };
+            } catch (error) {
+                return {
+                    success: false,
+                    message: JSON.stringify({ error: String(error) })
+                };
+            }
+        }
     });
 
     const agent = createDreams({
-        model: groq("llama3-8b-8192"),
+        model: groq("deepseek-r1-distill-llama-70b"),
         memory: {
             store: createMemoryStore(),
             vector: createVectorStore(),
@@ -224,7 +355,7 @@ async function main() {
             getPositionsAction,
         ]
     }).start();
-    
+
     return agent;
 }
 

@@ -10,6 +10,8 @@ import {
     typedData as starkTypedData,
     Account,
 } from "starknet";
+import { StarknetChain } from "@daydreamsai/core";
+import { Logger, LogLevel } from "@daydreamsai/core";
 
 interface AuthRequest extends Record<string, unknown> {
     method: string;
@@ -197,14 +199,24 @@ export async function openOrder(
             body: inputBody,
         });
 
+        const data = await response.json();
+
         if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+            throw new Error(`Order failed: ${data.message || response.status}`);
         }
 
-        const data = await response.json();
-        return data;
-    } catch (e) {
-        console.error(e);
+        // Log the full response to see what's available
+        console.log("Order response:", data);
+        
+        // Return the full data object or specific fields
+        return {
+            orderId: data.orderId || data.id || 'filled-immediately',
+            status: data.status || 'success',
+            data: data
+        };
+    } catch (error) {
+        console.error('Error in openOrder:', error);
+        throw error;
     }
 }
 
@@ -379,4 +391,60 @@ export function toQuantums(
     const bnAmount = typeof amount === "string" ? BigNumber(amount) : amount;
     const bnQuantums = bnAmount.multipliedBy(new BigNumber(10).pow(precision));
     return bnQuantums.integerValue(BigNumber.ROUND_FLOOR).toString();
+}
+
+export class ParadexClient {
+    private chain: StarknetChain;
+    private logger: Logger;
+    private config: ParadexConfig;
+
+    constructor(config: ParadexConfig, account: ParadexAccount) {
+        this.config = config;
+        this.chain = new StarknetChain({
+            rpcUrl: config.apiBaseUrl,
+            address: account.address,
+            privateKey: account.privateKey
+        });
+
+        // Initialize logger
+        this.logger = new Logger({
+            level: LogLevel.INFO,
+            enableColors: true
+        });
+    }
+
+    // Wrap existing functions to use the chain interface
+    async listAvailableMarkets(market?: string) {
+        try {
+            const result = await this.chain.read({
+                contractAddress: this.config.apiBaseUrl,
+                entrypoint: "markets",
+                calldata: market ? [market] : []
+            });
+
+            this.logger.info("ParadexClient", "Markets fetched", { market });
+            return result;
+        } catch (error) {
+            this.logger.error("ParadexClient", "Failed to fetch markets", { error });
+            throw error;
+        }
+    }
+
+    async openOrder(orderDetails: Record<string, string>) {
+        try {
+            const result = await this.chain.write({
+                contractAddress: this.config.apiBaseUrl,
+                entrypoint: "orders",
+                calldata: [orderDetails]
+            });
+
+            this.logger.info("ParadexClient", "Order placed", { orderDetails });
+            return result;
+        } catch (error) {
+            this.logger.error("ParadexClient", "Failed to place order", { error });
+            throw error;
+        }
+    }
+
+    // ... implement other methods similarly
 }
