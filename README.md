@@ -109,3 +109,7 @@ paradex-get-positions
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+# Inspiration
+
+https://github.com/milancermak/paradreams
