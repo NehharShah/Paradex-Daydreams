@@ -18,13 +18,34 @@ import {
     createMemoryStore,
     createVectorStore,
 } from "@daydreamsai/core/v1";
+import type { Action } from "@daydreamsai/core/v1";
 import { z } from "zod";
+import { storeOrder, getOrder } from "./memory";
+
 interface ParadexOrder {
     market: string;
     side: string;
     type: string;
     size: string;
     price: string;
+}
+
+// Cache for market data to reduce API calls
+const marketCache = new Map<string, { data: any, timestamp: number }>();
+const CACHE_DURATION = 30000; // 30 seconds cache duration
+
+// Utility function to get markets with caching
+async function getCachedMarkets(config: ParadexConfig, market?: string): Promise<any[]> {
+    const cacheKey = market || 'all_markets';
+    const cached = marketCache.get(cacheKey);
+    
+    if (cached && (Date.now() - cached.timestamp < CACHE_DURATION)) {
+        return cached.data;
+    }
+
+    const markets = await listAvailableMarkets(config, market);
+    marketCache.set(cacheKey, { data: markets, timestamp: Date.now() });
+    return markets;
 }
 
 async function paradexLogin(): Promise<
@@ -53,15 +74,82 @@ async function paradexLogin(): Promise<
     return { config, account };
 }
 
+// Debounced authentication refresh
+let authRefreshTimeout: ReturnType<typeof setTimeout>;
+async function debouncedAuthRefresh(config: ParadexConfig, account: ParadexAccount) {
+    if (authRefreshTimeout) {
+        clearTimeout(authRefreshTimeout);
+    }
+    authRefreshTimeout = setTimeout(async () => {
+        try {
+            account.jwtToken = await authenticate(config, account);
+        } catch (error) {
+            console.error('Auth refresh failed:', error);
+        }
+    }, 1000);
+}
+
+// Add rate limiting constants and tracking
+const RATE_LIMITS = {
+    REQUESTS_PER_MINUTE: 25, // Setting slightly below limit for safety
+    REQUESTS_PER_DAY: 950,   // Setting slightly below limit for safety
+};
+
+// Rate limiting tracking
+const rateLimiter = {
+    requestsThisMinute: 0,
+    requestsToday: 0,
+    lastMinuteTimestamp: Date.now(),
+    lastDayTimestamp: Date.now(),
+    
+    // Reset counters when appropriate
+    resetCounters() {
+        const now = Date.now();
+        if (now - this.lastMinuteTimestamp >= 60000) {
+            this.requestsThisMinute = 0;
+            this.lastMinuteTimestamp = now;
+        }
+        if (now - this.lastDayTimestamp >= 86400000) {
+            this.requestsToday = 0;
+            this.lastDayTimestamp = now;
+        }
+    },
+
+    // Check if we can make a request
+    canMakeRequest() {
+        this.resetCounters();
+        return this.requestsThisMinute < RATE_LIMITS.REQUESTS_PER_MINUTE &&
+               this.requestsToday < RATE_LIMITS.REQUESTS_PER_DAY;
+    },
+
+    // Track a new request
+    trackRequest() {
+        this.requestsThisMinute++;
+        this.requestsToday++;
+    }
+};
+
 async function main() {
     const { config, account } = await paradexLogin();
+    
+    // More efficient interval handling
     const refreshInterval = setInterval(async () => {
-        account.jwtToken = await authenticate(config, account);
+        try {
+            account.jwtToken = await authenticate(config, account);
+        } catch (error) {
+            console.error('Auth refresh failed:', error);
+        }
     }, 1000 * 60 * 3 - 3000); // refresh every ~3 minutes
-    process.on("SIGTERM", () => {
+
+    // Proper cleanup
+    const cleanup = () => {
         clearInterval(refreshInterval);
+        marketCache.clear();
         process.exit(0);
-    });
+    };
+
+    process.on("SIGTERM", cleanup);
+    process.on("SIGINT", cleanup);
 
     const accountInfo = await getAccountInfo(config, account);
     console.log(`Account:
@@ -97,111 +185,129 @@ async function main() {
 
     const openOrderAction = action({
         name: "paradex-open-order",
-        description: "Open a new order on Paradex. You can describe your order in natural language, like 'buy 0.1 ETH at 3000 dollars' or 'sell 0.5 BTC at market price'.",
+        description: "Open a market or limit order on Paradex. Examples: 'buy 0.1 ETH at market price' or 'buy 0.5 BTC at limit 40000'",
         schema: z.object({
             text: z.string().describe("Natural language description of the order you want to place")
         }),
         handler: async (call, _ctx, _agent) => {
             try {
-                const availableMarkets = await listAvailableMarkets(config);
                 const text = call.data.text.toLowerCase();
+                
+                // Memoized order pattern regex
+                const orderPattern = /\b(buy|sell)\s+(\d+\.?\d*)\s+([a-zA-Z0-9]+)(?:\s+(?:at|@)\s+(market|limit)\s*(?:price\s*)?(?:(\d+\.?\d*))?)?/i;
+                const match = text.match(orderPattern);
 
-                // First look for the token/market name
-                const tokenMatch = text.match(/\b(?:buy|sell)\s+\d+\.?\d*\s+([a-zA-Z0-9]+)\b/i);
-                if (!tokenMatch) {
+                if (!match) {
                     return {
                         success: false,
                         message: JSON.stringify({
-                            text: "Please specify which token you want to trade"
+                            text: "Invalid order format. Examples:\n" +
+                                  "'buy 0.1 ETH at market price'\n" +
+                                  "'sell 0.5 BTC at limit 40000'"
                         })
                     };
                 }
 
-                const baseToken = tokenMatch[1].toUpperCase();
-                const marketSymbol = `${baseToken}-USD-PERP`;
+                const [, side, size, baseToken, orderType, limitPrice] = match;
+                const marketSymbol = `${baseToken.toUpperCase()}-USD-PERP`;
 
-                console.log("Detected token:", baseToken);
-                console.log("Constructed market symbol:", marketSymbol);
-
-                const marketExists = availableMarkets.some((m: { symbol: string }) => m.symbol === marketSymbol);
-
-                if (!marketExists) {
-                    return {
-                        success: false,
-                        message: JSON.stringify({
-                            text: `Market ${marketSymbol} is not available. Please check the available markets list.`
-                        })
-                    };
-                }
-
+                // Use cached market data
+                const availableMarkets = await getCachedMarkets(config);
                 const market = availableMarkets.find((m: { symbol: string }) => m.symbol === marketSymbol);
+
                 if (!market) {
                     return {
                         success: false,
                         message: JSON.stringify({
-                            text: `Market ${marketSymbol} is not available`
+                            text: `Market ${marketSymbol} is not available. Available markets:\n` +
+                                  availableMarkets.map((m: { symbol: string }) => m.symbol).join(", ")
                         })
                     };
                 }
 
-                const sideMatch = text.match(/\b(buy|sell)\b/);
-                const sizeMatch = text.match(/\b(\d+\.?\d*)\b/);
+                // Pre-calculate values for better performance
+                const sizeNum = Number(size);
+                const sizeIncrement = Number(market.order_size_increment);
+                const adjustedSize = Math.max(
+                    sizeIncrement,
+                    Math.ceil(sizeNum / sizeIncrement) * sizeIncrement
+                ).toString();
 
-                if (!sideMatch || !sizeMatch) {
-                    return {
-                        success: false,
-                        message: JSON.stringify({
-                            text: "Please specify the side (buy/sell) and size. For example: 'buy 0.1 LINK at market price'"
-                        })
-                    };
-                }
-
-                const size = sizeMatch ? Math.max(
-                    Number(market.order_size_increment),
-                    Math.ceil(Number(sizeMatch[1]) / Number(market.order_size_increment)) * Number(market.order_size_increment)
-                ).toString() : null;
-
-                if (!size) {
-                    return {
-                        success: false,
-                        message: JSON.stringify({
-                            text: "Invalid order size"
-                        })
-                    };
-                }
-
-                const orderDetails = {
+                // Prepare order details with type assertion
+                const orderDetails: Record<string, string> = {
                     market: marketSymbol,
-                    side: sideMatch[1].toUpperCase(),
-                    type: "MARKET",
-                    size,
-                    timeInForceType: "IOC"
+                    side: side.toUpperCase(),
+                    size: adjustedSize,
+                    timeInForceType: orderType.toLowerCase() === 'market' ? 'IOC' : 'GTC',
+                    type: orderType.toLowerCase() === 'limit' ? 'LIMIT' : 'MARKET'
                 };
 
-                console.log("Interpreted order:", orderDetails);
+                // Handle limit orders efficiently
+                if (orderDetails.type === 'LIMIT') {
+                    if (!limitPrice) {
+                        return {
+                            success: false,
+                            message: JSON.stringify({
+                                text: "Limit orders require a price. Example: 'buy 0.1 ETH at limit 3000'"
+                            })
+                        };
+                    }
 
+                    const tickSize = Number(market.tick_size);
+                    const priceNum = Number(limitPrice);
+                    orderDetails.price = (Math.ceil(priceNum / tickSize) * tickSize).toString();
+
+                    // Efficient price validation using cached market data
+                    const currentMarket = await getCachedMarkets(config, marketSymbol);
+                    const lastPrice = Number(currentMarket[0]?.last_price || 0);
+                    
+                    if (lastPrice && Math.abs((priceNum - lastPrice) / lastPrice) > 0.1) {
+                        return {
+                            success: false,
+                            message: JSON.stringify({
+                                text: `Warning: Your limit price (${orderDetails.price}) deviates significantly from the last price (${lastPrice}). Please confirm the price.`
+                            })
+                        };
+                    }
+                }
+
+                // Execute order with proper error handling
                 try {
                     const result = await openOrder(config, account, orderDetails);
-                    console.log("Order response:", result);
+                    
+                    // Parallel operations for storing order and refreshing auth
+                    await Promise.all([
+                        storeOrder(result.orderId, {
+                            ...orderDetails,
+                            timestamp: Date.now(),
+                            status: result.status,
+                            response: result.data,
+                            executionType: orderDetails.type,
+                            originalRequest: text
+                        }),
+                        debouncedAuthRefresh(config, account)
+                    ]);
+
                     return {
                         success: true,
                         message: JSON.stringify({
-                            text: `Order opened successfully. Order ID: ${result.orderId}`
+                            text: `${orderDetails.type} order opened successfully:\n` +
+                                  `• Order ID: ${result.orderId}\n` +
+                                  `• ${side.toUpperCase()} ${adjustedSize} ${baseToken}\n` +
+                                  (orderDetails.type === 'LIMIT' ? `• Price: ${orderDetails.price}\n` : '') +
+                                  `• Status: ${result.status}`
                         })
                     };
                 } catch (error) {
-                    return {
-                        success: false,
-                        message: JSON.stringify({
-                            error: error instanceof Error ? error.message : String(error)
-                        })
-                    };
+                    console.error('Order execution error:', error);
+                    throw error;
                 }
             } catch (error) {
-                console.error('Error processing order:', error);
                 return {
                     success: false,
-                    message: JSON.stringify({ error: error instanceof Error ? error.message : String(error) })
+                    message: JSON.stringify({
+                        error: error instanceof Error ? error.message : String(error)
+                    })
                 };
             }
         }
@@ -339,21 +445,81 @@ async function main() {
         }
     });
 
+    const getOrderHistoryAction = action({
+        name: "paradex-get-order-history",
+        description: "Retrieve details of a specific order by ID",
+        schema: z.object({
+            text: z.string().describe("Natural language request to get order details, including order ID")
+        }),
+        handler: async (call, _ctx, _agent) => {
+            try {
+                const text = call.data.text.toLowerCase();
+                const orderIdMatch = text.match(/(?:order|#)\s*([a-zA-Z0-9]+)/);
+
+                if (!orderIdMatch) {
+                    return {
+                        success: false,
+                        message: JSON.stringify({
+                            text: "Please specify the order ID. For example: 'show order 123'"
+                        })
+                    };
+                }
+
+                const orderId = orderIdMatch[1];
+                const orderDetails = await getOrder(orderId);
+
+                if (!orderDetails) {
+                    return {
+                        success: false,
+                        message: JSON.stringify({
+                            text: `No history found for order ${orderId}`
+                        })
+                    };
+                }
+
+                return {
+                    success: true,
+                    message: JSON.stringify({
+                        text: `Order ${orderId} details:\n${JSON.stringify(orderDetails, null, 2)}`
+                    })
+                };
+            } catch (error) {
+                return {
+                    success: false,
+                    message: JSON.stringify({
+                        error: error instanceof Error ? error.message : String(error)
+                    })
+                };
+            }
+        }
+    });
+
     const agent = createDreams({
-        model: groq("deepseek-r1-distill-llama-70b"),
+        model: groq("llama-3.3-70b-versatile"),
         memory: {
             store: createMemoryStore(),
             vector: createVectorStore(),
         },
         extensions: [cli],
         actions: [
-            getAccountInfoAction,
-            openOrderAction,
-            cancelOrderAction,
-            listOpenOrdersAction,
-            listAvailableMarketsAction,
-            getPositionsAction,
-        ]
+            ...[getAccountInfoAction, openOrderAction, cancelOrderAction,
+                listOpenOrdersAction, listAvailableMarketsAction,
+                getPositionsAction, getOrderHistoryAction].map(originalAction => ({
+                ...originalAction,
+                handler: async (call: any, ctx: any, agent: any) => {
+                    if (!rateLimiter.canMakeRequest()) {
+                        return {
+                            success: false,
+                            message: JSON.stringify({
+                                text: "Rate limit reached. Please wait a moment before trying again."
+                            })
+                        };
+                    }
+                    rateLimiter.trackRequest();
+                    return originalAction.handler(call, ctx, agent);
+                }
+            })) as Action<any, any, any, any, any>[]
+        ],
     }).start();
 
     return agent;
