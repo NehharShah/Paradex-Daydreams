@@ -38,7 +38,7 @@ const CACHE_DURATION = 30000; // 30 seconds cache duration
 async function getCachedMarkets(config: ParadexConfig, market?: string): Promise<any[]> {
     const cacheKey = market || 'all_markets';
     const cached = marketCache.get(cacheKey);
-    
+
     if (cached && (Date.now() - cached.timestamp < CACHE_DURATION)) {
         return cached.data;
     }
@@ -101,7 +101,7 @@ const rateLimiter = {
     requestsToday: 0,
     lastMinuteTimestamp: Date.now(),
     lastDayTimestamp: Date.now(),
-    
+
     // Reset counters when appropriate
     resetCounters() {
         const now = Date.now();
@@ -119,7 +119,7 @@ const rateLimiter = {
     canMakeRequest() {
         this.resetCounters();
         return this.requestsThisMinute < RATE_LIMITS.REQUESTS_PER_MINUTE &&
-               this.requestsToday < RATE_LIMITS.REQUESTS_PER_DAY;
+            this.requestsToday < RATE_LIMITS.REQUESTS_PER_DAY;
     },
 
     // Track a new request
@@ -131,7 +131,7 @@ const rateLimiter = {
 
 async function main() {
     const { config, account } = await paradexLogin();
-    
+
     // More efficient interval handling
     const refreshInterval = setInterval(async () => {
         try {
@@ -192,7 +192,7 @@ async function main() {
         handler: async (call, _ctx, _agent) => {
             try {
                 const text = call.data.text.toLowerCase();
-                
+
                 // Memoized order pattern regex
                 const orderPattern = /\b(buy|sell)\s+(\d+\.?\d*)\s+([a-zA-Z0-9]+)(?:\s+(?:at|@)\s+(market|limit)\s*(?:price\s*)?(?:(\d+\.?\d*))?)?/i;
                 const match = text.match(orderPattern);
@@ -202,8 +202,8 @@ async function main() {
                         success: false,
                         message: JSON.stringify({
                             text: "Invalid order format. Examples:\n" +
-                                  "'buy 0.1 ETH at market price'\n" +
-                                  "'sell 0.5 BTC at limit 40000'"
+                                "'buy 0.1 ETH at market price'\n" +
+                                "'sell 0.5 BTC at limit 40000'"
                         })
                     };
                 }
@@ -220,7 +220,7 @@ async function main() {
                         success: false,
                         message: JSON.stringify({
                             text: `Market ${marketSymbol} is not available. Available markets:\n` +
-                                  availableMarkets.map((m: { symbol: string }) => m.symbol).join(", ")
+                                availableMarkets.map((m: { symbol: string }) => m.symbol).join(", ")
                         })
                     };
                 }
@@ -260,7 +260,7 @@ async function main() {
                     // Efficient price validation using cached market data
                     const currentMarket = await getCachedMarkets(config, marketSymbol);
                     const lastPrice = Number(currentMarket[0]?.last_price || 0);
-                    
+
                     if (lastPrice && Math.abs((priceNum - lastPrice) / lastPrice) > 0.1) {
                         return {
                             success: false,
@@ -274,7 +274,7 @@ async function main() {
                 // Execute order with proper error handling
                 try {
                     const result = await openOrder(config, account, orderDetails);
-                    
+
                     // Parallel operations for storing order and refreshing auth
                     await Promise.all([
                         storeOrder(result.orderId, {
@@ -292,10 +292,10 @@ async function main() {
                         success: true,
                         message: JSON.stringify({
                             text: `${orderDetails.type} order opened successfully:\n` +
-                                  `• Order ID: ${result.orderId}\n` +
-                                  `• ${side.toUpperCase()} ${adjustedSize} ${baseToken}\n` +
-                                  (orderDetails.type === 'LIMIT' ? `• Price: ${orderDetails.price}\n` : '') +
-                                  `• Status: ${result.status}`
+                                `• Order ID: ${result.orderId}\n` +
+                                `• ${side.toUpperCase()} ${adjustedSize} ${baseToken}\n` +
+                                (orderDetails.type === 'LIMIT' ? `• Price: ${orderDetails.price}\n` : '') +
+                                `• Status: ${result.status}`
                         })
                     };
                 } catch (error) {
@@ -505,20 +505,20 @@ async function main() {
             ...[getAccountInfoAction, openOrderAction, cancelOrderAction,
                 listOpenOrdersAction, listAvailableMarketsAction,
                 getPositionsAction, getOrderHistoryAction].map(originalAction => ({
-                ...originalAction,
-                handler: async (call: any, ctx: any, agent: any) => {
-                    if (!rateLimiter.canMakeRequest()) {
-                        return {
-                            success: false,
-                            message: JSON.stringify({
-                                text: "Rate limit reached. Please wait a moment before trying again."
-                            })
-                        };
+                    ...originalAction,
+                    handler: async (call: any, ctx: any, agent: any) => {
+                        if (!rateLimiter.canMakeRequest()) {
+                            return {
+                                success: false,
+                                message: JSON.stringify({
+                                    text: "Rate limit reached. Please wait a moment before trying again."
+                                })
+                            };
+                        }
+                        rateLimiter.trackRequest();
+                        return originalAction.handler(call, ctx, agent);
                     }
-                    rateLimiter.trackRequest();
-                    return originalAction.handler(call, ctx, agent);
-                }
-            })) as Action<any, any, any, any, any>[]
+                })) as Action<any, any, any, any, any>[]
         ],
     }).start();
 
