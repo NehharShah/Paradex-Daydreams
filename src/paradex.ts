@@ -177,6 +177,12 @@ export async function openOrder(
     account: ParadexAccount,
     orderDetails: Record<string, string>,
 ) {
+    // Validate price before proceeding
+    const price = Number(orderDetails.price);
+    if (price <= 0) {
+        throw new Error("Order failed: price must be a non-negative non-zero number.");
+    }
+
     const timestamp = Date.now();
     const signature = signOrder(config, account, orderDetails, timestamp);
 

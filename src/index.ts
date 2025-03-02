@@ -495,7 +495,7 @@ async function main() {
     });
 
     const agent = createDreams({
-        model: groq("llama-3.3-70b-versatile"),
+        model: groq("deepseek-r1-distill-llama-70b"),
         memory: {
             store: createMemoryStore(),
             vector: createVectorStore(),
