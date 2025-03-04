@@ -8,6 +8,7 @@ import {
     listAvailableMarkets,
     openOrder,
     cancelOrder,
+    analyzeMarket,
 } from "./paradex";
 import { env } from "./config";
 import { groq } from "@ai-sdk/groq";
@@ -151,13 +152,23 @@ async function main() {
     process.on("SIGTERM", cleanup);
     process.on("SIGINT", cleanup);
 
-    const accountInfo = await getAccountInfo(config, account);
-    console.log(`Account:
-        Status: ${accountInfo.status}
-        Value: ${accountInfo.account_value}
-        P&L: ${accountInfo.account_value - accountInfo.total_collateral},
-        Free collateral: ${accountInfo.free_collateral}`);
-    //console.log(JSON.stringify(accountInfo, null, 2));
+    try {
+        const accountInfo = await getAccountInfo(config, account);
+        if (!accountInfo) {
+            throw new Error('Failed to retrieve account information');
+        }
+        
+        console.log(`Account:
+            Status: ${accountInfo.status || 'N/A'}
+            Value: ${accountInfo.account_value || 'N/A'}
+            P&L: ${accountInfo.account_value && accountInfo.total_collateral ? 
+                (accountInfo.account_value - accountInfo.total_collateral) : 'N/A'}
+            Free collateral: ${accountInfo.free_collateral || 'N/A'}`);
+    } catch (error) {
+        console.error('Failed to get account info:', error);
+        cleanup();
+        return;
+    }
 
     const getAccountInfoAction = action({
         name: "paradex-get-account-info",
@@ -278,7 +289,11 @@ async function main() {
                     // Parallel operations for storing order and refreshing auth
                     await Promise.all([
                         storeOrder(result.orderId, {
-                            ...orderDetails,
+                            market: orderDetails.market,
+                            side: orderDetails.side as 'BUY' | 'SELL',
+                            type: orderDetails.type as 'MARKET' | 'LIMIT',
+                            size: orderDetails.size,
+                            price: orderDetails.price,
                             timestamp: Date.now(),
                             status: result.status,
                             response: result.data,
@@ -494,6 +509,55 @@ async function main() {
         }
     });
 
+    const analyzeMarketAction = action({
+        name: "paradex-analyze-market",
+        description: "Analyze a specific market and provide trading recommendations",
+        schema: z.object({
+            text: z.string().describe("Natural language request for market analysis, including the market symbol")
+        }),
+        handler: async (call, _ctx, _agent) => {
+            try {
+                const text = call.data.text.toLowerCase();
+                const marketMatch = text.match(/(?:analyze|check|predict)\s+([a-zA-Z0-9]+)/i);
+
+                if (!marketMatch) {
+                    return {
+                        success: false,
+                        message: JSON.stringify({
+                            text: "Please specify the market to analyze. For example: 'analyze BTC' or 'predict ETH'"
+                        })
+                    };
+                }
+
+                const baseToken = marketMatch[1].toUpperCase();
+                const marketSymbol = `${baseToken}-USD-PERP`;
+
+                const analysis = await analyzeMarket(config, marketSymbol);
+
+                return {
+                    success: true,
+                    message: JSON.stringify({
+                        text: `Analysis for ${marketSymbol}:\n\n` +
+                            `Recommendation: ${analysis.recommendation}\n` +
+                            `Confidence: ${(analysis.confidence * 100).toFixed(1)}%\n` +
+                            `Reasoning: ${analysis.reasoning}\n\n` +
+                            `Metrics:\n` +
+                            `• Volatility: ${(analysis.metrics.volatility * 100).toFixed(2)}%\n` +
+                            `• Momentum: ${(analysis.metrics.momentum * 100).toFixed(2)}%\n` +
+                            `• Volume Trend: ${analysis.metrics.volume_trend.toFixed(3)}`
+                    })
+                };
+            } catch (error) {
+                return {
+                    success: false,
+                    message: JSON.stringify({
+                        error: error instanceof Error ? error.message : String(error)
+                    })
+                };
+            }
+        }
+    });
+
     const agent = createDreams({
         model: groq("deepseek-r1-distill-llama-70b"),
         memory: {
@@ -504,7 +568,7 @@ async function main() {
         actions: [
             ...[getAccountInfoAction, openOrderAction, cancelOrderAction,
                 listOpenOrdersAction, listAvailableMarketsAction,
-                getPositionsAction, getOrderHistoryAction].map(originalAction => ({
+                getPositionsAction, getOrderHistoryAction, analyzeMarketAction].map(originalAction => ({
                     ...originalAction,
                     handler: async (call: any, ctx: any, agent: any) => {
                         if (!rateLimiter.canMakeRequest()) {
