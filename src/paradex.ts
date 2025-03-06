@@ -1,6 +1,3 @@
-// most stuff here is taken from
-// https://github.com/tradeparadex/code-samples/tree/main/typescript
-
 import BigNumber from "bignumber.js";
 import type { ParadexAccount, ParadexConfig } from "./types";
 import {
@@ -58,7 +55,6 @@ interface AnalysisResult {
     positionLimits: PositionLimits;
 }
 
-// Add new interface for batch orders
 interface BatchOrderResult {
     orderId: string;
     market: string;
@@ -74,10 +70,6 @@ const DOMAIN_TYPES = {
     ],
 };
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-
-//
-// public
-//
 
 export async function authenticate(config: ParadexConfig, account: ParadexAccount) {
     const { signature, timestamp, expiration } = signAuthRequest(
@@ -116,7 +108,6 @@ export async function authenticate(config: ParadexConfig, account: ParadexAccoun
     }
 }
 
-// https://docs.paradex.trade/api-reference/prod/account/get
 export async function getAccountInfo(config: ParadexConfig, account: ParadexAccount) {
     if (!account.jwtToken) {
         throw new Error('No JWT token available. Please authenticate first.');
@@ -149,7 +140,6 @@ export async function getAccountInfo(config: ParadexConfig, account: ParadexAcco
     }
 }
 
-// https://docs.paradex.trade/api-reference/prod/markets/get-markets
 export async function listAvailableMarkets(
     config: ParadexConfig,
     market?: string,
@@ -179,11 +169,10 @@ export async function listAvailableMarkets(
         return data.results;
     } catch (e) {
         console.error('Error fetching markets:', e);
-        throw e; // Propagate the error instead of swallowing it
+        throw e;
     }
 }
 
-// https://docs.paradex.trade/api-reference/prod/account/get-positions
 export async function getPositions(config: ParadexConfig, account: ParadexAccount) {
     const headers = {
         Accept: "application/json",
@@ -207,7 +196,6 @@ export async function getPositions(config: ParadexConfig, account: ParadexAccoun
     }
 }
 
-// https://docs.paradex.trade/api-reference/prod/orders/get-open-orders
 export async function getOpenOrders(config: ParadexConfig, account: ParadexAccount) {
     const headers = {
         Accept: "application/json",
@@ -231,13 +219,11 @@ export async function getOpenOrders(config: ParadexConfig, account: ParadexAccou
     }
 }
 
-// https://docs.paradex.trade/api-reference/prod/orders/new
 export async function openOrder(
     config: ParadexConfig,
     account: ParadexAccount,
     orderDetails: Record<string, string>,
 ) {
-    // Validate price before proceeding
     const price = Number(orderDetails.price);
     if (price <= 0) {
         throw new Error("Order failed: price must be a non-negative non-zero number.");
@@ -271,10 +257,8 @@ export async function openOrder(
             throw new Error(`Order failed: ${data.message || response.status}`);
         }
 
-        // Log the full response to see what's available
         console.log("Order response:", data);
-        
-        // Return the full data object or specific fields
+
         return {
             orderId: data.orderId || data.id || 'filled-immediately',
             status: data.status || 'success',
@@ -286,7 +270,6 @@ export async function openOrder(
     }
 }
 
-// https://docs.paradex.trade/api-reference/prod/orders/cancel
 export async function cancelOrder(
     config: ParadexConfig,
     account: ParadexAccount,
@@ -312,23 +295,19 @@ export async function cancelOrder(
     }
 }
 
-// Add this helper function to calculate position limits and risk bands
 function calculatePositionLimits(
     marketData: MarketData,
     accountValue: number,
     volatility: number
 ): PositionLimits {
-    // Base max leverage on volatility
-    const baseMaxLeverage = 20; // Maximum leverage allowed
+    const baseMaxLeverage = 20;
     const volatilityAdjustedLeverage = Math.min(
         baseMaxLeverage,
         baseMaxLeverage * (1 - volatility * 5)
     );
 
-    // Calculate maximum position value (in USD)
     const maxPositionValue = accountValue * volatilityAdjustedLeverage;
 
-    // Determine risk band based on volatility and market conditions
     let riskBand: RiskBand;
     if (volatility < 0.02) {
         riskBand = {
@@ -350,10 +329,9 @@ function calculatePositionLimits(
         };
     }
 
-    // Calculate recommended position size based on risk band
     const recommendedPositionSize = Math.min(
         riskBand.maxPositionSize,
-        maxPositionValue * 0.25 // Use 25% of max position value as recommended size
+        maxPositionValue * 0.25
     );
 
     return {
@@ -364,11 +342,10 @@ function calculatePositionLimits(
     };
 }
 
-// Update the analyzeMarket function
 export async function analyzeMarket(
     config: ParadexConfig,
     market: string,
-    account?: ParadexAccount // Make account optional
+    account?: ParadexAccount
 ): Promise<AnalysisResult> {
     try {
         const marketData = await listAvailableMarkets(config, market);
@@ -377,15 +354,13 @@ export async function analyzeMarket(
         }
 
         const data = marketData[0] as MarketData;
-        
-        // Get account value if account is provided
-        let accountValue = 10000; // Default value
+
+        let accountValue = 10000;
         if (account) {
             const accountInfo = await getAccountInfo(config, account);
             accountValue = parseFloat(accountInfo.account_value);
         }
 
-        // Calculate basic metrics
         const lastPrice = parseFloat(data.last_price);
         const markPrice = parseFloat(data.mark_price);
         const indexPrice = parseFloat(data.index_price);
@@ -393,17 +368,14 @@ export async function analyzeMarket(
         const volume24h = parseFloat(data.volume_24h);
         const priceChange24h = parseFloat(data.price_change_24h);
 
-        // Calculate analysis metrics
         const volatility = Math.abs((markPrice - indexPrice) / indexPrice);
         const momentum = priceChange24h / lastPrice;
         const volumeTrend = volume24h / (lastPrice * parseFloat(data.open_interest));
 
-        // Determine recommendation
         let recommendation: 'BUY' | 'SELL' | 'HOLD';
         let confidence = 0;
         let reasoning = '';
 
-        // Analysis logic
         if (momentum > 0.02 && fundingRate < 0.001) {
             recommendation = 'BUY';
             confidence = Math.min(0.8, Math.abs(momentum) * 5);
@@ -418,28 +390,24 @@ export async function analyzeMarket(
             reasoning = 'Market conditions are neutral';
         }
 
-        // Add volume analysis
         if (volumeTrend > 0.1) {
             confidence += 0.1;
             reasoning += ' with strong volume support';
         }
 
-        // Add volatility consideration
         if (volatility > 0.02) {
             confidence -= 0.2;
             reasoning += ' (Note: High volatility detected)';
         }
 
-        // Calculate position limits
         const positionLimits = calculatePositionLimits(
             data,
             accountValue,
             volatility
         );
 
-        // Adjust confidence based on risk band
         if (positionLimits.riskBand.level === 'HIGH') {
-            confidence *= 0.8; // Reduce confidence in high-risk conditions
+            confidence *= 0.8;
             reasoning += ' (High risk conditions - exercise caution)';
         }
 
@@ -460,7 +428,6 @@ export async function analyzeMarket(
     }
 }
 
-// Add new function for batch order execution
 export async function executeBatchOrders(
     config: ParadexConfig,
     account: ParadexAccount,
@@ -473,7 +440,6 @@ export async function executeBatchOrders(
         timeInForceType?: string;
     }>
 ): Promise<BatchOrderResult[]> {
-    // Execute orders in parallel with Promise.all
     const results = await Promise.all(
         orders.map(async (orderDetails): Promise<BatchOrderResult> => {
             try {
@@ -497,11 +463,6 @@ export async function executeBatchOrders(
     return results;
 }
 
-//
-// private
-//
-
-// Utility function to generate current and expiration timestamps
 function generateTimestamps(): {
     timestamp: number;
     expiration: number;
@@ -528,7 +489,7 @@ function signAuthRequest(
     const request: AuthRequest = {
         method: "POST",
         path: "/v1/auth",
-        body: "", // Assuming no body is required for this request
+        body: "",
         timestamp,
         expiration,
     };
@@ -580,11 +541,11 @@ function buildAuthTypedData(
         types: {
             ...DOMAIN_TYPES,
             Request: [
-                { name: "method", type: "felt" }, // string
-                { name: "path", type: "felt" }, // string
-                { name: "body", type: "felt" }, // string
-                { name: "timestamp", type: "felt" }, // number
-                { name: "expiration", type: "felt" }, // number
+                { name: "method", type: "felt" },
+                { name: "path", type: "felt" },
+                { name: "body", type: "felt" },
+                { name: "timestamp", type: "felt" },
+                { name: "expiration", type: "felt" },
             ],
         },
         message,
@@ -602,12 +563,12 @@ function buildOrderTypedData(
         types: {
             ...DOMAIN_TYPES,
             Order: [
-                { name: "timestamp", type: "felt" }, // UnixTimeMs; Acts as a nonce
-                { name: "market", type: "felt" }, // 'BTC-USD-PERP'
-                { name: "side", type: "felt" }, // '1': 'BUY'; '2': 'SELL'
-                { name: "orderType", type: "felt" }, // 'LIMIT';  'MARKET'
-                { name: "size", type: "felt" }, // Quantum value
-                { name: "price", type: "felt" }, // Quantum value; '0' for Market order
+                { name: "timestamp", type: "felt" },
+                { name: "market", type: "felt" },
+                { name: "side", type: "felt" },
+                { name: "orderType", type: "felt" },
+                { name: "size", type: "felt" },
+                { name: "price", type: "felt" },
             ],
         },
         message,
@@ -628,13 +589,6 @@ function signatureFromTypedData(account: ParadexAccount, typedData: TypedData) {
     return JSON.stringify([r.toString(), s.toString()]);
 }
 
-/**
- * Convert to quantums rounding final number down.
- *
- * @param amount Amount in human numbers
- * @param precision How many decimals the target contract works with
- * @returns Quantum value
- */
 export function toQuantums(
     amount: BigNumber | string,
     precision: number,
@@ -657,14 +611,12 @@ export class ParadexClient {
             privateKey: account.privateKey
         });
 
-        // Initialize logger
         this.logger = new Logger({
             level: LogLevel.INFO,
             enableColors: true
         });
     }
 
-    // Wrap existing functions to use the chain interface
     async listAvailableMarkets(market?: string) {
         try {
             const result = await this.chain.read({
@@ -696,6 +648,4 @@ export class ParadexClient {
             throw error;
         }
     }
-
-    // ... implement other methods similarly
 }

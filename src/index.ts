@@ -31,11 +31,9 @@ interface ParadexOrder {
     price: string;
 }
 
-// Cache for market data to reduce API calls
 const marketCache = new Map<string, { data: any, timestamp: number }>();
-const CACHE_DURATION = 30000; // 30 seconds cache duration
+const CACHE_DURATION = 30000;
 
-// Utility function to get markets with caching
 async function getCachedMarkets(config: ParadexConfig, market?: string): Promise<any[]> {
     const cacheKey = market || 'all_markets';
     const cached = marketCache.get(cacheKey);
@@ -52,12 +50,8 @@ async function getCachedMarkets(config: ParadexConfig, market?: string): Promise
 async function paradexLogin(): Promise<
     { config: ParadexConfig; account: ParadexAccount }
 > {
-    // testnet
     const apiBaseUrl = env.apiBaseUrl;
     const chainId = shortString.encodeShortString(env.starknet.chainId);
-    // mainnet, see https://api.prod.paradex.trade/v1/system/config
-    // const apiBaseUrl = "https://api.prod.paradex.trade/v1"
-    // const chainId = shortString.encodeShortString("PRIVATE_SN_PARACLEAR_MAINNET");
 
     const config: ParadexConfig = {
         apiBaseUrl,
@@ -75,7 +69,6 @@ async function paradexLogin(): Promise<
     return { config, account };
 }
 
-// Debounced authentication refresh
 let authRefreshTimeout: ReturnType<typeof setTimeout>;
 async function debouncedAuthRefresh(config: ParadexConfig, account: ParadexAccount) {
     if (authRefreshTimeout) {
@@ -90,20 +83,17 @@ async function debouncedAuthRefresh(config: ParadexConfig, account: ParadexAccou
     }, 1000);
 }
 
-// Add rate limiting constants and tracking
 const RATE_LIMITS = {
-    REQUESTS_PER_MINUTE: 25, // Setting slightly below limit for safety
-    REQUESTS_PER_DAY: 950,   // Setting slightly below limit for safety
+    REQUESTS_PER_MINUTE: 25,
+    REQUESTS_PER_DAY: 950,
 };
 
-// Rate limiting tracking
 const rateLimiter = {
     requestsThisMinute: 0,
     requestsToday: 0,
     lastMinuteTimestamp: Date.now(),
     lastDayTimestamp: Date.now(),
 
-    // Reset counters when appropriate
     resetCounters() {
         const now = Date.now();
         if (now - this.lastMinuteTimestamp >= 60000) {
@@ -116,14 +106,12 @@ const rateLimiter = {
         }
     },
 
-    // Check if we can make a request
     canMakeRequest() {
         this.resetCounters();
         return this.requestsThisMinute < RATE_LIMITS.REQUESTS_PER_MINUTE &&
             this.requestsToday < RATE_LIMITS.REQUESTS_PER_DAY;
     },
 
-    // Track a new request
     trackRequest() {
         this.requestsThisMinute++;
         this.requestsToday++;
@@ -133,16 +121,14 @@ const rateLimiter = {
 async function main() {
     const { config, account } = await paradexLogin();
 
-    // More efficient interval handling
     const refreshInterval = setInterval(async () => {
         try {
             account.jwtToken = await authenticate(config, account);
         } catch (error) {
             console.error('Auth refresh failed:', error);
         }
-    }, 1000 * 60 * 3 - 3000); // refresh every ~3 minutes
+    }, 1000 * 60 * 3 - 3000);
 
-    // Proper cleanup
     const cleanup = () => {
         clearInterval(refreshInterval);
         marketCache.clear();
@@ -157,11 +143,11 @@ async function main() {
         if (!accountInfo) {
             throw new Error('Failed to retrieve account information');
         }
-        
+
         console.log(`Account:
             Status: ${accountInfo.status || 'N/A'}
             Value: ${accountInfo.account_value || 'N/A'}
-            P&L: ${accountInfo.account_value && accountInfo.total_collateral ? 
+            P&L: ${accountInfo.account_value && accountInfo.total_collateral ?
                 (accountInfo.account_value - accountInfo.total_collateral) : 'N/A'}
             Free collateral: ${accountInfo.free_collateral || 'N/A'}`);
     } catch (error) {
@@ -204,7 +190,6 @@ async function main() {
             try {
                 const text = call.data.text.toLowerCase();
 
-                // Memoized order pattern regex
                 const orderPattern = /\b(buy|sell)\s+(\d+\.?\d*)\s+([a-zA-Z0-9]+)(?:\s+(?:at|@)\s+(market|limit)\s*(?:price\s*)?(?:(\d+\.?\d*))?)?/i;
                 const match = text.match(orderPattern);
 
@@ -222,7 +207,6 @@ async function main() {
                 const [, side, size, baseToken, orderType, limitPrice] = match;
                 const marketSymbol = `${baseToken.toUpperCase()}-USD-PERP`;
 
-                // Use cached market data
                 const availableMarkets = await getCachedMarkets(config);
                 const market = availableMarkets.find((m: { symbol: string }) => m.symbol === marketSymbol);
 
@@ -236,7 +220,6 @@ async function main() {
                     };
                 }
 
-                // Pre-calculate values for better performance
                 const sizeNum = Number(size);
                 const sizeIncrement = Number(market.order_size_increment);
                 const adjustedSize = Math.max(
@@ -244,7 +227,6 @@ async function main() {
                     Math.ceil(sizeNum / sizeIncrement) * sizeIncrement
                 ).toString();
 
-                // Prepare order details with type assertion
                 const orderDetails: Record<string, string> = {
                     market: marketSymbol,
                     side: side.toUpperCase(),
@@ -253,7 +235,6 @@ async function main() {
                     type: orderType.toLowerCase() === 'limit' ? 'LIMIT' : 'MARKET'
                 };
 
-                // Handle limit orders efficiently
                 if (orderDetails.type === 'LIMIT') {
                     if (!limitPrice) {
                         return {
@@ -268,7 +249,6 @@ async function main() {
                     const priceNum = Number(limitPrice);
                     orderDetails.price = (Math.ceil(priceNum / tickSize) * tickSize).toString();
 
-                    // Efficient price validation using cached market data
                     const currentMarket = await getCachedMarkets(config, marketSymbol);
                     const lastPrice = Number(currentMarket[0]?.last_price || 0);
 
@@ -282,11 +262,9 @@ async function main() {
                     }
                 }
 
-                // Execute order with proper error handling
                 try {
                     const result = await openOrder(config, account, orderDetails);
 
-                    // Parallel operations for storing order and refreshing auth
                     await Promise.all([
                         storeOrder(result.orderId, {
                             market: orderDetails.market,
